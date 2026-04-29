@@ -80,6 +80,9 @@ export default defineConfig(({ mode }) => {
         { find: 'react-dom', replacement: path.resolve(__dirname, 'node_modules/react-dom') },
       ],
     },
+    optimizeDeps: {
+      include: ['react', 'react-dom', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+    },
     server: {
       proxy: {
         '^/api/v1/terminal/sockjs*': {
