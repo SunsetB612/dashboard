@@ -19,7 +19,7 @@ import dagre from 'dagre';
 import type { Node, Edge } from '@xyflow/react';
 
 const NODE_WIDTH = 240;
-const NODE_HEIGHT = 120;
+const NODE_HEIGHT = 90;
 
 export function useLayout(nodes: Node[], edges: Edge[]) {
   return useMemo(() => {
@@ -27,7 +27,7 @@ export function useLayout(nodes: Node[], edges: Edge[]) {
 
     const g = new dagre.graphlib.Graph();
     g.setDefaultEdgeLabel(() => ({}));
-    g.setGraph({ rankdir: 'TB', nodesep: 120, ranksep: 150, align: 'DL', marginx: 50, marginy: 50 });
+    g.setGraph({ rankdir: 'TB', nodesep: 100, ranksep: 130, align: 'DL', marginx: 60, marginy: 60 });
 
     nodes.forEach((node) => {
       g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });

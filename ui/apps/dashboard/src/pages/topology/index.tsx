@@ -31,7 +31,7 @@ const kindOptions = [
 const TopologyPage = () => {
   const { nsOptions, isNsDataLoading } = useNamespace({});
   const [namespace, setNamespace] = useState('');
-  const [kind, setKind] = useState('Deployment');
+  const [kind, setKind] = useState('');
   const [name, setName] = useState('');
   const [query, setQuery] = useState({ namespace: '', kind: '', name: '' });
 
@@ -63,8 +63,10 @@ const TopologyPage = () => {
               placeholder="Kind"
               options={kindOptions}
               className="min-w-[150px]"
-              value={kind}
-              onChange={(v) => setKind(v)}
+              allowClear
+              showSearch
+              value={kind || undefined}
+              onChange={(v) => setKind(v || '')}
             />
             <Select
               placeholder="Resource Name"
