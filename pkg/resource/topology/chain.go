@@ -317,6 +317,48 @@ func clusterNameFromWorkNamespace(ns string) string {
 	return ""
 }
 
+// getWorkStatus returns the health status of a Work based on its conditions.
+func getWorkStatus(w *workv1alpha1.Work) NodeStatus {
+	for _, c := range w.Status.Conditions {
+		if c.Type == "Applied" {
+			if c.Status == metav1.ConditionTrue {
+				return NodeStatusHealthy
+			}
+			if c.Status == metav1.ConditionFalse {
+				return NodeStatusAbnormal
+			}
+			return NodeStatusProgressing
+		}
+	}
+	// No Applied condition yet — still being processed
+	return NodeStatusProgressing
+}
+
+// getResourceBindingStatus returns the health status of a ResourceBinding based on its conditions.
+func getResourceBindingStatus(rb *workv1alpha2.ResourceBinding) NodeStatus {
+	scheduled := false
+	fullyApplied := false
+	for _, c := range rb.Status.Conditions {
+		if c.Type == "Scheduled" && c.Status == metav1.ConditionTrue {
+			scheduled = true
+		}
+		if c.Type == "Scheduled" && c.Status == metav1.ConditionFalse {
+			return NodeStatusAbnormal
+		}
+		if c.Type == "FullyApplied" && c.Status == metav1.ConditionTrue {
+			fullyApplied = true
+		}
+	}
+	if fullyApplied {
+		return NodeStatusHealthy
+	}
+	if scheduled {
+		return NodeStatusProgressing
+	}
+	// No Scheduled condition yet — awaiting scheduling
+	return NodeStatusProgressing
+}
+
 // getMemberWorkloadStatus fetches the member cluster workload and returns its health status.
 func getMemberWorkloadStatus(ctx context.Context, clusterName, namespace, name, kind string) NodeStatus {
 	memberClient := client.InClusterClientForMemberCluster(clusterName)
@@ -376,7 +418,7 @@ func traceChain(
 			Type:      NodeTypeResourceBinding,
 			Name:      rb.Name,
 			Namespace: rb.Namespace,
-			Status:    NodeStatusHealthy,
+			Status:    getResourceBindingStatus(rb),
 		})
 		ppLabel := ""
 		var ppEdgeData *TopologyEdgeData
@@ -418,7 +460,7 @@ func traceChain(
 					Name:      w.Name,
 					Namespace: w.Namespace,
 					Cluster:   clusterName,
-					Status:    NodeStatusHealthy,
+					Status:    getWorkStatus(w),
 				})
 				opLabel := ""
 				var opEdgeData *TopologyEdgeData
