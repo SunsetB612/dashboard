@@ -244,12 +244,40 @@ func getPodsByWorkUID(ctx context.Context, clusterName, namespace, name, kind st
 	return filterPodsByOwners(podList.Items, ownerUIDs), nil
 }
 
+// containerFailureReasons lists container waiting reasons that indicate an unrecoverable error.
+var containerFailureReasons = map[string]bool{
+	"CrashLoopBackOff":     true,
+	"ImagePullBackOff":     true,
+	"ErrImagePull":         true,
+	"ImageInspectError":    true,
+	"RegistryUnavailable":  true,
+	"CreateContainerError": true,
+}
+
+// hasContainerFailure checks if any container (including init containers) is stuck in a known failure state.
+func hasContainerFailure(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Waiting != nil && containerFailureReasons[cs.State.Waiting.Reason] {
+			return true
+		}
+	}
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if cs.State.Waiting != nil && containerFailureReasons[cs.State.Waiting.Reason] {
+			return true
+		}
+	}
+	return false
+}
+
 // getPodStatus evaluates the health status of a Pod.
 func getPodStatus(pod *corev1.Pod) NodeStatus {
-	// Check pod phase
+	// Check if any container is in an unrecoverable failure state
+	if hasContainerFailure(pod) {
+		return NodeStatusAbnormal
+	}
+
 	switch pod.Status.Phase {
 	case corev1.PodRunning:
-		// Pod is running, check if all containers are ready
 		if pod.Status.Conditions != nil {
 			for _, condition := range pod.Status.Conditions {
 				if condition.Type == corev1.PodReady {
@@ -260,25 +288,20 @@ func getPodStatus(pod *corev1.Pod) NodeStatus {
 				}
 			}
 		}
-		// Pod is running but not all containers are ready
 		return NodeStatusProgressing
 
 	case corev1.PodSucceeded:
-		// Pod completed successfully (e.g., Job pods)
 		return NodeStatusHealthy
 
 	case corev1.PodPending:
-		// Pod is waiting to be scheduled or containers are starting
 		return NodeStatusProgressing
 
 	case corev1.PodFailed:
-		// Pod has failed
 		return NodeStatusAbnormal
 
 	case corev1.PodUnknown:
 		fallthrough
 	default:
-		// Unknown state
 		return NodeStatusAbnormal
 	}
 }
@@ -335,27 +358,35 @@ func getWorkStatus(w *workv1alpha1.Work) NodeStatus {
 }
 
 // getResourceBindingStatus returns the health status of a ResourceBinding based on its conditions.
+// FullyApplied takes priority: if resources are deployed, it's healthy regardless of current scheduler state.
 func getResourceBindingStatus(rb *workv1alpha2.ResourceBinding) NodeStatus {
 	scheduled := false
+	scheduleFailed := false
 	fullyApplied := false
 	for _, c := range rb.Status.Conditions {
-		if c.Type == "Scheduled" && c.Status == metav1.ConditionTrue {
-			scheduled = true
-		}
-		if c.Type == "Scheduled" && c.Status == metav1.ConditionFalse {
-			return NodeStatusAbnormal
-		}
-		if c.Type == "FullyApplied" && c.Status == metav1.ConditionTrue {
-			fullyApplied = true
+		switch c.Type {
+		case "Scheduled":
+			if c.Status == metav1.ConditionTrue {
+				scheduled = true
+			} else if c.Status == metav1.ConditionFalse {
+				scheduleFailed = true
+			}
+		case "FullyApplied":
+			if c.Status == metav1.ConditionTrue {
+				fullyApplied = true
+			}
 		}
 	}
+	// Resources are deployed — healthy even if scheduler later reports transient issues
 	if fullyApplied {
 		return NodeStatusHealthy
+	}
+	if scheduleFailed {
+		return NodeStatusAbnormal
 	}
 	if scheduled {
 		return NodeStatusProgressing
 	}
-	// No Scheduled condition yet — awaiting scheduling
 	return NodeStatusProgressing
 }
 
@@ -367,15 +398,53 @@ func getMemberWorkloadStatus(ctx context.Context, clusterName, namespace, name, 
 	}
 	switch kind {
 	case "Deployment":
-		deploy, err := memberClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		obj, err := memberClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			klog.V(4).InfoS("Failed to get member deployment", "cluster", clusterName, "err", err)
 			return NodeStatusAbnormal
 		}
-		if deploy.Spec.Replicas != nil && deploy.Status.ReadyReplicas == *deploy.Spec.Replicas {
+		if obj.Spec.Replicas != nil && obj.Status.ReadyReplicas == *obj.Spec.Replicas {
 			return NodeStatusHealthy
 		}
 		return NodeStatusProgressing
+	case "StatefulSet":
+		obj, err := memberClient.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			klog.V(4).InfoS("Failed to get member statefulset", "cluster", clusterName, "err", err)
+			return NodeStatusAbnormal
+		}
+		if obj.Spec.Replicas != nil && obj.Status.ReadyReplicas == *obj.Spec.Replicas {
+			return NodeStatusHealthy
+		}
+		return NodeStatusProgressing
+	case "DaemonSet":
+		obj, err := memberClient.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			klog.V(4).InfoS("Failed to get member daemonset", "cluster", clusterName, "err", err)
+			return NodeStatusAbnormal
+		}
+		if obj.Status.NumberReady == obj.Status.DesiredNumberScheduled && obj.Status.DesiredNumberScheduled > 0 {
+			return NodeStatusHealthy
+		}
+		return NodeStatusProgressing
+	case "Job":
+		obj, err := memberClient.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			klog.V(4).InfoS("Failed to get member job", "cluster", clusterName, "err", err)
+			return NodeStatusAbnormal
+		}
+		if obj.Status.Succeeded > 0 {
+			return NodeStatusHealthy
+		}
+		for _, c := range obj.Status.Conditions {
+			if c.Type == "Failed" && c.Status == corev1.ConditionTrue {
+				return NodeStatusAbnormal
+			}
+		}
+		return NodeStatusProgressing
+	case "CronJob":
+		// CronJob itself does not expose a health status; existence implies healthy.
+		return NodeStatusHealthy
 	default:
 		return NodeStatusHealthy
 	}
